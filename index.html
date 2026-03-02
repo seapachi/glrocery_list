@@ -21,21 +21,10 @@
 <div id="root"></div>
 
 <script type="text/babel">
-const { useState, useCallback, useEffect } = React;
+const { useState, useCallback, useEffect, useRef } = React;
 
-const DEFAULT_CATEGORIES = {
-  "🥩 肉・魚介":        ["豚肉","鶏","合挽き肉","ひき肉","タコ","海老","ウィンナー","ベーコン","ハム","サーモン","まぐろ","いか"],
-  "🧊 冷凍食品":        ["冷凍","UFO","ピザ"],
-  "🥛 乳製品・卵":      ["たまご","卵","豆乳","R-1","ヨーグルト","チーズ","牛乳","バター"],
-  "🥬 野菜":            ["白菜","にら","もやし","にらもやし","パプリカ","キャベツ","ほうれん草","玉ねぎ","にんじん","じゃがいも","トマト","きゅうり","ねぎ","大根"],
-  "🍜 麺・パスタ":      ["そば","パスタ","パリメン","さりめん","ラーメン","うどん","そうめん"],
-  "🛒 加工食品・調味料": ["納豆","豆腐","たこやきの粉","鍋のだし","パスタソース","ソース","醤油","みりん","酢","塩","砂糖","マヨネーズ","ケチャップ","味噌","だし"],
-  "🍬 お菓子・嗜好品":  ["グミ","チョコ","ポテチ","クッキー","アイス","ジュース"],
-  "🍽️ 惣菜・調理品":   ["晩御飯","惣菜","弁当"],
-  "💊 薬・日用品":      ["パブロン","風邪薬","薬","シャンプー","洗剤","ティッシュ","トイレットペーパー"],
-};
-const DEFAULT_CATEGORY_KEYS = Object.keys(DEFAULT_CATEGORIES);
-const DEFAULT_ORDER = [...DEFAULT_CATEGORY_KEYS, "📦 その他"];
+const DEFAULT_SCHEMA_VERSION = 1;
+const EXPORT_SCHEMA_VERSION = 1;
 
 const SK_KEYWORDS   = "grocery-custom-keywords";
 const SK_CATEGORIES = "grocery-custom-categories";
@@ -46,9 +35,113 @@ const ls = {
   set(key, val) { try { localStorage.setItem(key, val); } catch {} },
 };
 
-function buildCategoryMap(customKeywords, customCategories) {
+function isPlainObject(value) {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function uniqueNonEmptyStrings(values) {
+  if (!Array.isArray(values)) return [];
+  const seen = new Set();
+  const next = [];
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    next.push(trimmed);
+  }
+  return next;
+}
+
+function sanitizeKeywordMap(raw) {
+  if (!isPlainObject(raw)) return {};
+  const out = {};
+  for (const [key, value] of Object.entries(raw)) {
+    if (typeof key !== "string" || typeof value !== "string") continue;
+    const kw = key.trim();
+    const cat = value.trim();
+    if (!kw || !cat) continue;
+    out[kw] = cat;
+  }
+  return out;
+}
+
+function sanitizeCustomCategories(raw, otherCategoryName) {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const entry of raw) {
+    if (!isPlainObject(entry)) continue;
+    const name = typeof entry.name === "string" ? entry.name.trim() : "";
+    if (!name || name === otherCategoryName || seen.has(name)) continue;
+    seen.add(name);
+    out.push({ name, keywords: uniqueNonEmptyStrings(entry.keywords) });
+  }
+  return out;
+}
+
+function categoriesToMap(categories) {
   const map = {};
-  for (const [cat, kws] of Object.entries(DEFAULT_CATEGORIES)) map[cat] = [...kws];
+  for (const category of categories) {
+    map[category.name] = [...category.keywords];
+  }
+  return map;
+}
+
+function sanitizeCategoryOrder(rawOrder, defaultCategoryKeys, customCategories, otherCategoryName) {
+  const customNames = customCategories.map((c) => c.name);
+  const allowedOrder = [...defaultCategoryKeys, ...customNames, otherCategoryName];
+  const allowedSet = new Set(allowedOrder);
+
+  const next = [];
+  if (Array.isArray(rawOrder)) {
+    for (const entry of rawOrder) {
+      if (typeof entry !== "string") continue;
+      const cat = entry.trim();
+      if (!cat || !allowedSet.has(cat) || next.includes(cat)) continue;
+      next.push(cat);
+    }
+  }
+
+  for (const cat of defaultCategoryKeys) {
+    if (!next.includes(cat)) next.push(cat);
+  }
+  for (const cat of customNames) {
+    if (!next.includes(cat)) next.push(cat);
+  }
+  if (!next.includes(otherCategoryName)) next.push(otherCategoryName);
+
+  return next;
+}
+
+function filterKeywordTargets(keywordMap, allowedCategoryNames) {
+  const allowedSet = new Set(allowedCategoryNames);
+  return Object.fromEntries(Object.entries(keywordMap).filter(([, cat]) => allowedSet.has(cat)));
+}
+
+function areStringArraysEqual(a, b) {
+  if (!Array.isArray(a) || !Array.isArray(b)) return false;
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+function categoryFingerprint(category) {
+  return JSON.stringify({
+    name: category.name,
+    keywords: [...category.keywords].sort(),
+  });
+}
+
+function areCategoryDefinitionsEqual(a, b) {
+  return categoryFingerprint(a) === categoryFingerprint(b);
+}
+
+function buildCategoryMap(defaultCategoryMap, customKeywords, customCategories) {
+  const map = {};
+  for (const [cat, kws] of Object.entries(defaultCategoryMap)) map[cat] = [...kws];
   for (const cc of customCategories) map[cc.name] = [...(cc.keywords || [])];
   for (const [kw, cat] of Object.entries(customKeywords)) {
     if (map[cat] && !map[cat].includes(kw)) map[cat].push(kw);
@@ -56,21 +149,342 @@ function buildCategoryMap(customKeywords, customCategories) {
   return map;
 }
 
-function categorize(name, map) {
+function categorize(name, map, otherCategoryName) {
   for (const [cat, kws] of Object.entries(map)) {
     if (kws.some((k) => name.includes(k))) return cat;
   }
-  return "📦 その他";
+  return otherCategoryName;
 }
 
-function parseList(text, map) {
+function parseList(text, map, otherCategoryName) {
   return text.split(/[、,，\n]+/).map((s) => s.trim()).filter(Boolean)
-    .map((name, i) => ({ id: i, name, done: false, category: categorize(name, map) }));
+    .map((name, i) => ({ id: i, name, done: false, category: categorize(name, map, otherCategoryName) }));
 }
 
 function sortedGroups(groups, order) {
   return order.filter((c) => groups[c])
     .concat(Object.keys(groups).filter((c) => !order.includes(c)));
+}
+
+function validateDefaultConfig(raw) {
+  if (!isPlainObject(raw)) {
+    throw new Error("default-categories.json はオブジェクト形式で指定してください。");
+  }
+  if (raw.version !== DEFAULT_SCHEMA_VERSION) {
+    throw new Error(`default-categories.json の version は ${DEFAULT_SCHEMA_VERSION} を指定してください。`);
+  }
+
+  const otherCategoryName = typeof raw.otherCategoryName === "string" ? raw.otherCategoryName.trim() : "";
+  if (!otherCategoryName) {
+    throw new Error("default-categories.json の otherCategoryName は必須です。");
+  }
+
+  if (!Array.isArray(raw.categories) || raw.categories.length === 0) {
+    throw new Error("default-categories.json の categories は1件以上必要です。");
+  }
+
+  const seenNames = new Set();
+  const categories = raw.categories.map((entry, idx) => {
+    if (!isPlainObject(entry)) {
+      throw new Error(`categories[${idx}] の形式が不正です。`);
+    }
+
+    const name = typeof entry.name === "string" ? entry.name.trim() : "";
+    if (!name) {
+      throw new Error(`categories[${idx}] の name は必須です。`);
+    }
+    if (name === otherCategoryName) {
+      throw new Error(`categories[${idx}] の name は otherCategoryName と重複できません。`);
+    }
+    if (seenNames.has(name)) {
+      throw new Error(`categories の name が重複しています: ${name}`);
+    }
+    seenNames.add(name);
+
+    if (!Array.isArray(entry.keywords)) {
+      throw new Error(`categories[${idx}] の keywords は配列で指定してください。`);
+    }
+
+    const seenKeywords = new Set();
+    const keywords = [];
+    entry.keywords.forEach((kw, kwIdx) => {
+      if (typeof kw !== "string") {
+        throw new Error(`categories[${idx}].keywords[${kwIdx}] は文字列で指定してください。`);
+      }
+      const trimmed = kw.trim();
+      if (!trimmed) {
+        throw new Error(`categories[${idx}].keywords[${kwIdx}] は空文字を許可しません。`);
+      }
+      if (!seenKeywords.has(trimmed)) {
+        seenKeywords.add(trimmed);
+        keywords.push(trimmed);
+      }
+    });
+
+    return { name, keywords };
+  });
+
+  const defaultCategoryKeys = categories.map((c) => c.name);
+  const defaultCategoryMap = categoriesToMap(categories);
+  const defaultOrder = [...defaultCategoryKeys, otherCategoryName];
+
+  return {
+    version: raw.version,
+    otherCategoryName,
+    categories,
+    defaultCategoryKeys,
+    defaultCategoryMap,
+    defaultOrder,
+  };
+}
+
+async function loadDefaultConfig() {
+  const response = await fetch("./default-categories.json", { cache: "no-store" });
+  if (!response.ok) {
+    throw new Error(`default-categories.json の読み込みに失敗しました (HTTP ${response.status})。`);
+  }
+  const raw = await response.json();
+  return validateDefaultConfig(raw);
+}
+
+function validateImportPayload(raw, defaultCategoryKeys, otherCategoryName) {
+  if (!isPlainObject(raw)) {
+    throw new Error("インポートファイルの形式が不正です。JSONオブジェクトを指定してください。");
+  }
+  if (raw.version !== EXPORT_SCHEMA_VERSION) {
+    throw new Error(`インポートファイルの version は ${EXPORT_SCHEMA_VERSION} が必要です。`);
+  }
+  if (!isPlainObject(raw.data)) {
+    throw new Error("インポートファイルの data が不正です。");
+  }
+  if (!isPlainObject(raw.data.customKeywords)) {
+    throw new Error("data.customKeywords はオブジェクトで指定してください。");
+  }
+  if (!Array.isArray(raw.data.customCategories)) {
+    throw new Error("data.customCategories は配列で指定してください。");
+  }
+  if (!Array.isArray(raw.data.categoryOrder)) {
+    throw new Error("data.categoryOrder は配列で指定してください。");
+  }
+
+  const customKeywords = {};
+  Object.entries(raw.data.customKeywords).forEach(([rawKeyword, rawCategory]) => {
+    if (typeof rawKeyword !== "string") {
+      throw new Error("data.customKeywords のキーは文字列で指定してください。");
+    }
+    if (typeof rawCategory !== "string") {
+      throw new Error(`キーワード「${rawKeyword}」のカテゴリは文字列で指定してください。`);
+    }
+    const keyword = rawKeyword.trim();
+    const category = rawCategory.trim();
+    if (!keyword) {
+      throw new Error("data.customKeywords に空のキーワードは指定できません。");
+    }
+    if (!category) {
+      throw new Error(`キーワード「${keyword}」のカテゴリが空です。`);
+    }
+    customKeywords[keyword] = category;
+  });
+
+  const customCategories = [];
+  const seenCustomCategoryNames = new Set();
+  raw.data.customCategories.forEach((entry, idx) => {
+    if (!isPlainObject(entry)) {
+      throw new Error(`data.customCategories[${idx}] の形式が不正です。`);
+    }
+    const name = typeof entry.name === "string" ? entry.name.trim() : "";
+    if (!name) {
+      throw new Error(`data.customCategories[${idx}].name は必須です。`);
+    }
+    if (name === otherCategoryName) {
+      throw new Error(`data.customCategories[${idx}].name は otherCategoryName と重複できません。`);
+    }
+    if (seenCustomCategoryNames.has(name)) {
+      throw new Error(`data.customCategories の name が重複しています: ${name}`);
+    }
+    if (!Array.isArray(entry.keywords)) {
+      throw new Error(`data.customCategories[${idx}].keywords は配列で指定してください。`);
+    }
+
+    const seenKeywords = new Set();
+    const keywords = [];
+    entry.keywords.forEach((kw, kwIdx) => {
+      if (typeof kw !== "string") {
+        throw new Error(`data.customCategories[${idx}].keywords[${kwIdx}] は文字列で指定してください。`);
+      }
+      const trimmed = kw.trim();
+      if (!trimmed) {
+        throw new Error(`data.customCategories[${idx}].keywords[${kwIdx}] は空文字を許可しません。`);
+      }
+      if (!seenKeywords.has(trimmed)) {
+        seenKeywords.add(trimmed);
+        keywords.push(trimmed);
+      }
+    });
+
+    seenCustomCategoryNames.add(name);
+    customCategories.push({ name, keywords });
+  });
+
+  const order = [];
+  const seenOrder = new Set();
+  raw.data.categoryOrder.forEach((entry, idx) => {
+    if (typeof entry !== "string") {
+      throw new Error(`data.categoryOrder[${idx}] は文字列で指定してください。`);
+    }
+    const trimmed = entry.trim();
+    if (!trimmed) {
+      throw new Error(`data.categoryOrder[${idx}] に空文字は指定できません。`);
+    }
+    if (seenOrder.has(trimmed)) {
+      throw new Error(`data.categoryOrder に重複があります: ${trimmed}`);
+    }
+    seenOrder.add(trimmed);
+    order.push(trimmed);
+  });
+
+  if (!order.length) {
+    throw new Error("data.categoryOrder は1件以上必要です。");
+  }
+
+  const allowedCategories = new Set([
+    ...defaultCategoryKeys,
+    ...customCategories.map((c) => c.name),
+    otherCategoryName,
+  ]);
+
+  for (const [keyword, cat] of Object.entries(customKeywords)) {
+    if (!allowedCategories.has(cat)) {
+      throw new Error(`キーワード「${keyword}」のカテゴリ「${cat}」が不正です。`);
+    }
+  }
+
+  order.forEach((cat) => {
+    if (!allowedCategories.has(cat)) {
+      throw new Error(`data.categoryOrder に未知のカテゴリがあります: ${cat}`);
+    }
+  });
+
+  return {
+    customKeywords,
+    customCategories,
+    categoryOrder: order,
+  };
+}
+
+function detectImportConflicts(currentData, incomingData) {
+  const conflicts = [];
+
+  for (const [keyword, incomingCategory] of Object.entries(incomingData.customKeywords)) {
+    if (keyword in currentData.customKeywords && currentData.customKeywords[keyword] !== incomingCategory) {
+      conflicts.push({
+        id: `kw:${keyword}`,
+        label: `キーワード: ${keyword}`,
+        currentText: currentData.customKeywords[keyword],
+        importedText: incomingCategory,
+      });
+    }
+  }
+
+  const currentCategoryByName = new Map(currentData.customCategories.map((cat) => [cat.name, cat]));
+  incomingData.customCategories.forEach((incomingCategory) => {
+    const currentCategory = currentCategoryByName.get(incomingCategory.name);
+    if (!currentCategory) return;
+    if (areCategoryDefinitionsEqual(currentCategory, incomingCategory)) return;
+    conflicts.push({
+      id: `cat:${incomingCategory.name}`,
+      label: `カスタムカテゴリ: ${incomingCategory.name}`,
+      currentText: currentCategory.keywords.length
+        ? `現在: ${currentCategory.keywords.join("、")}`
+        : "現在: （キーワードなし）",
+      importedText: incomingCategory.keywords.length
+        ? `取込: ${incomingCategory.keywords.join("、")}`
+        : "取込: （キーワードなし）",
+    });
+  });
+
+  if (!areStringArraysEqual(currentData.categoryOrder, incomingData.categoryOrder)) {
+    conflicts.push({
+      id: "order",
+      label: "カテゴリ表示順",
+      currentText: `現在: ${currentData.categoryOrder.join(" → ")}`,
+      importedText: `取込: ${incomingData.categoryOrder.join(" → ")}`,
+    });
+  }
+
+  return conflicts;
+}
+
+function mergeImportData(currentData, incomingData, choices, defaultCategoryKeys, otherCategoryName) {
+  const mergedKeywords = { ...currentData.customKeywords };
+
+  for (const [keyword, incomingCategory] of Object.entries(incomingData.customKeywords)) {
+    if (!(keyword in mergedKeywords)) {
+      mergedKeywords[keyword] = incomingCategory;
+      continue;
+    }
+    const currentCategory = mergedKeywords[keyword];
+    if (currentCategory === incomingCategory) continue;
+    const choice = choices[`kw:${keyword}`] || "current";
+    mergedKeywords[keyword] = choice === "imported" ? incomingCategory : currentCategory;
+  }
+
+  const currentCategoryByName = new Map(currentData.customCategories.map((cat) => [cat.name, cat]));
+  incomingData.customCategories.forEach((incomingCategory) => {
+    const currentCategory = currentCategoryByName.get(incomingCategory.name);
+    if (!currentCategory) {
+      currentCategoryByName.set(incomingCategory.name, incomingCategory);
+      return;
+    }
+    if (areCategoryDefinitionsEqual(currentCategory, incomingCategory)) return;
+    const choice = choices[`cat:${incomingCategory.name}`] || "current";
+    currentCategoryByName.set(incomingCategory.name, choice === "imported" ? incomingCategory : currentCategory);
+  });
+
+  const mergedCategories = [];
+  const seenCategoryNames = new Set();
+  currentData.customCategories.forEach((cat) => {
+    const chosen = currentCategoryByName.get(cat.name) || cat;
+    if (seenCategoryNames.has(chosen.name)) return;
+    seenCategoryNames.add(chosen.name);
+    mergedCategories.push(chosen);
+  });
+  incomingData.customCategories.forEach((cat) => {
+    if (seenCategoryNames.has(cat.name)) return;
+    seenCategoryNames.add(cat.name);
+    mergedCategories.push(currentCategoryByName.get(cat.name) || cat);
+  });
+
+  const orderConflict = !areStringArraysEqual(currentData.categoryOrder, incomingData.categoryOrder);
+  const chosenOrder = orderConflict
+    ? (choices.order === "imported" ? incomingData.categoryOrder : currentData.categoryOrder)
+    : currentData.categoryOrder;
+
+  const mergedOrder = sanitizeCategoryOrder(chosenOrder, defaultCategoryKeys, mergedCategories, otherCategoryName);
+
+  const allowedCategoryNames = [
+    ...defaultCategoryKeys,
+    ...mergedCategories.map((c) => c.name),
+    otherCategoryName,
+  ];
+  const finalKeywords = filterKeywordTargets(mergedKeywords, allowedCategoryNames);
+
+  return {
+    customKeywords: finalKeywords,
+    customCategories: mergedCategories,
+    categoryOrder: mergedOrder,
+  };
+}
+
+function readFileAsText(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      resolve(typeof reader.result === "string" ? reader.result : "");
+    };
+    reader.onerror = () => reject(new Error("ファイルを読み込めませんでした。"));
+    reader.readAsText(file, "UTF-8");
+  });
 }
 
 const card       = { background: "#1a1f2e", borderRadius: 12, border: "1px solid #2a2f3e" };
@@ -147,8 +561,90 @@ function RegisterModal({ item, allCategoryKeys, onSave, onClose }) {
   );
 }
 
-function SettingsScreen({ categoryOrder, customCategories, onOrderChange, onDeleteCustom, onClose }) {
+function ImportConflictModal({ pendingImport, onChoiceChange, onCancel, onApply }) {
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.78)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 150 }} onClick={onCancel}>
+      <div onClick={(e) => e.stopPropagation()} style={{ background: "#1a1f2e", borderRadius: "18px 18px 0 0", width: "100%", maxWidth: 480, margin: "0 auto", padding: "20px 20px 44px", border: "1px solid #2a2f3e", borderBottom: "none", maxHeight: "86vh", overflowY: "auto" }}>
+        <div style={lbl}>IMPORT CONFLICT</div>
+        <div style={{ fontSize: 18, fontWeight: 800, color: "#e8eaf0", margin: "4px 0 12px" }}>競合を解決して取り込む</div>
+        <div style={{ fontSize: 12, color: "#555", marginBottom: 14, lineHeight: 1.6 }}>
+          競合ごとに「現在の値」か「インポート値」を選んで、最後にまとめて適用します。
+        </div>
+
+        {pendingImport.conflicts.map((conflict) => {
+          const selected = pendingImport.choices[conflict.id] || "current";
+          return (
+            <div key={conflict.id} style={{ ...card, padding: "12px 12px 10px", marginBottom: 10 }}>
+              <div style={{ fontSize: 13, color: "#d0d8f0", fontWeight: 700, marginBottom: 8 }}>{conflict.label}</div>
+              <div style={{ fontSize: 11, color: "#6c8ebf", lineHeight: 1.5, marginBottom: 10 }}>{conflict.currentText}</div>
+              <div style={{ fontSize: 11, color: "#f59e0b", lineHeight: 1.5, marginBottom: 10 }}>{conflict.importedText}</div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  onClick={() => onChoiceChange(conflict.id, "current")}
+                  style={{
+                    flex: 1,
+                    padding: "9px 10px",
+                    borderRadius: 8,
+                    border: `1px solid ${selected === "current" ? "#3b82f6" : "#2a2f3e"}`,
+                    background: selected === "current" ? "#1e3a6e" : "#0f1117",
+                    color: selected === "current" ? "#93c5fd" : "#666",
+                    fontSize: 12,
+                    cursor: "pointer",
+                  }}
+                >
+                  現在の値
+                </button>
+                <button
+                  onClick={() => onChoiceChange(conflict.id, "imported")}
+                  style={{
+                    flex: 1,
+                    padding: "9px 10px",
+                    borderRadius: 8,
+                    border: `1px solid ${selected === "imported" ? "#f59e0b" : "#2a2f3e"}`,
+                    background: selected === "imported" ? "#3d2a08" : "#0f1117",
+                    color: selected === "imported" ? "#f59e0b" : "#666",
+                    fontSize: 12,
+                    cursor: "pointer",
+                  }}
+                >
+                  インポート値
+                </button>
+              </div>
+            </div>
+          );
+        })}
+
+        <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
+          <button onClick={onCancel} style={{ ...btnGhost, flex: 1 }}>キャンセル</button>
+          <button onClick={onApply} style={{ ...btnPrimary, flex: 2 }}>選択内容で適用</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SettingsScreen({
+  categoryOrder,
+  customCategories,
+  otherCategoryName,
+  onOrderChange,
+  onDeleteCustom,
+  onClose,
+  onExportSettings,
+  onImportFile,
+  importNotice,
+  onDismissNotice,
+  pendingImport,
+  onConflictChoice,
+  onApplyImport,
+  onCancelImport,
+}) {
   const [order, setOrder] = useState(categoryOrder);
+  const fileInputRef = useRef(null);
+
+  useEffect(() => {
+    setOrder(categoryOrder);
+  }, [categoryOrder]);
 
   const move = (idx, dir) => {
     const next = [...order];
@@ -161,7 +657,7 @@ function SettingsScreen({ categoryOrder, customCategories, onOrderChange, onDele
   const customNames = customCategories.map((c) => c.name);
 
   return (
-    <div style={{ background: "#0f1117", minHeight: "100vh", maxWidth: 480, margin: "0 auto" }}>
+    <div style={{ background: "#0f1117", minHeight: "100vh", maxWidth: 480, margin: "0 auto", position: "relative" }}>
       <div style={{ background: "linear-gradient(135deg,#1a1f2e,#16213e)", padding: "20px 20px 16px", borderBottom: "1px solid #2a2f3e", position: "sticky", top: 0, zIndex: 10 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
           <div>
@@ -179,7 +675,7 @@ function SettingsScreen({ categoryOrder, customCategories, onOrderChange, onDele
 
         {order.map((cat, idx) => {
           const isCustom = customNames.includes(cat);
-          const isOther  = cat === "📦 その他";
+          const isOther  = cat === otherCategoryName;
           return (
             <div key={cat} style={{ ...card, display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", marginBottom: 8, borderColor: isCustom ? "#1e3a6e" : "#2a2f3e" }}>
               <div style={{ flex: 1, fontSize: 14, color: isOther ? "#555" : "#d0d8f0" }}>{cat}</div>
@@ -202,108 +698,328 @@ function SettingsScreen({ categoryOrder, customCategories, onOrderChange, onDele
         <button onClick={() => onOrderChange(order)} style={{ ...btnPrimary, width: "100%", marginTop: 8, padding: "16px" }}>
           この順番で保存 ✓
         </button>
+
+        <div style={{ ...card, marginTop: 14, padding: 14 }}>
+          <div style={lbl}>DATA PORTABILITY</div>
+          <div style={{ fontSize: 15, color: "#d0d8f0", fontWeight: 700, marginTop: 4, marginBottom: 10 }}>設定データの共有</div>
+          <div style={{ fontSize: 12, color: "#555", lineHeight: 1.6, marginBottom: 12 }}>
+            ユーザー追加のキーワード・カテゴリ・表示順を JSON で保存/取り込みできます。
+          </div>
+
+          <div style={{ display: "flex", gap: 8 }}>
+            <button onClick={onExportSettings} style={{ ...btnGhost, flex: 1, color: "#d0d8f0", borderColor: "#3a4050" }}>
+              設定をエクスポート
+            </button>
+            <button onClick={() => fileInputRef.current && fileInputRef.current.click()} style={{ ...btnPrimary, flex: 1 }}>
+              設定をインポート
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="application/json,.json"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                const file = e.target.files && e.target.files[0];
+                if (file) onImportFile(file);
+                e.target.value = "";
+              }}
+            />
+          </div>
+
+          {importNotice && (
+            <div style={{
+              marginTop: 10,
+              borderRadius: 8,
+              padding: "8px 10px",
+              fontSize: 12,
+              lineHeight: 1.5,
+              border: importNotice.type === "success"
+                ? "1px solid #1a3a2a"
+                : importNotice.type === "info"
+                  ? "1px solid #2a2f3e"
+                  : "1px solid #4a3010",
+              background: importNotice.type === "success"
+                ? "#0d1a0f"
+                : importNotice.type === "info"
+                  ? "#141a2a"
+                  : "#1e1810",
+              color: importNotice.type === "success"
+                ? "#4ade80"
+                : importNotice.type === "info"
+                  ? "#93c5fd"
+                  : "#f59e0b",
+            }}>
+              <div>{importNotice.message}</div>
+              <button onClick={onDismissNotice} style={{ background: "none", border: "none", color: "inherit", fontSize: 11, marginTop: 4, cursor: "pointer", textDecoration: "underline" }}>
+                閉じる
+              </button>
+            </div>
+          )}
+        </div>
       </div>
+
+      {pendingImport && (
+        <ImportConflictModal
+          pendingImport={pendingImport}
+          onChoiceChange={onConflictChoice}
+          onApply={onApplyImport}
+          onCancel={onCancelImport}
+        />
+      )}
     </div>
   );
 }
 
-function GroceryApp() {
+function GroceryApp({ defaultConfig }) {
+  const { defaultCategoryMap, defaultCategoryKeys, defaultOrder, otherCategoryName } = defaultConfig;
+
   const [phase, setPhase]                       = useState("paste");
   const [rawText, setRawText]                   = useState("");
   const [items, setItems]                       = useState([]);
   const [customKeywords, setCustomKeywords]     = useState({});
   const [customCategories, setCustomCategories] = useState([]);
-  const [categoryOrder, setCategoryOrder]       = useState(DEFAULT_ORDER);
+  const [categoryOrder, setCategoryOrder]       = useState(defaultOrder);
   const [registerItem, setRegisterItem]         = useState(null);
   const [savedFlash, setSavedFlash]             = useState(null);
+  const [importNotice, setImportNotice]         = useState(null);
+  const [pendingImport, setPendingImport]       = useState(null);
+
+  const persistUserData = useCallback((nextKeywords, nextCategories, nextOrder) => {
+    setCustomKeywords(nextKeywords);
+    setCustomCategories(nextCategories);
+    setCategoryOrder(nextOrder);
+    ls.set(SK_KEYWORDS, JSON.stringify(nextKeywords));
+    ls.set(SK_CATEGORIES, JSON.stringify(nextCategories));
+    ls.set(SK_ORDER, JSON.stringify(nextOrder));
+  }, []);
 
   useEffect(() => {
     try {
-      const kw = ls.get(SK_KEYWORDS);   if (kw) setCustomKeywords(JSON.parse(kw));
-      const cc = ls.get(SK_CATEGORIES); if (cc) setCustomCategories(JSON.parse(cc));
-      const co = ls.get(SK_ORDER);      if (co) setCategoryOrder(JSON.parse(co));
-    } catch {}
-  }, []);
+      const rawKeywords = ls.get(SK_KEYWORDS);
+      const rawCategories = ls.get(SK_CATEGORIES);
+      const rawOrder = ls.get(SK_ORDER);
 
-  const reset = useCallback(() => { setPhase("paste"); setRawText(""); setItems([]); setRegisterItem(null); }, []);
+      let nextKeywords = {};
+      let nextCategories = [];
+      let nextOrder = defaultOrder;
+
+      if (rawCategories) {
+        nextCategories = sanitizeCustomCategories(JSON.parse(rawCategories), otherCategoryName);
+      }
+
+      if (rawKeywords) {
+        nextKeywords = sanitizeKeywordMap(JSON.parse(rawKeywords));
+      }
+
+      const allowedCategoryNames = [
+        ...defaultCategoryKeys,
+        ...nextCategories.map((c) => c.name),
+        otherCategoryName,
+      ];
+      nextKeywords = filterKeywordTargets(nextKeywords, allowedCategoryNames);
+
+      if (rawOrder) {
+        nextOrder = sanitizeCategoryOrder(JSON.parse(rawOrder), defaultCategoryKeys, nextCategories, otherCategoryName);
+      }
+
+      setCustomCategories(nextCategories);
+      setCustomKeywords(nextKeywords);
+      setCategoryOrder(nextOrder);
+    } catch (error) {
+      console.error(error);
+    }
+  }, [defaultCategoryKeys, defaultOrder, otherCategoryName]);
+
+  const reset = useCallback(() => {
+    setPhase("paste");
+    setRawText("");
+    setItems([]);
+    setRegisterItem(null);
+  }, []);
 
   const handleStart = useCallback(() => {
     try {
-      const map    = buildCategoryMap(customKeywords, customCategories);
-      const parsed = parseList(rawText, map);
+      const map = buildCategoryMap(defaultCategoryMap, customKeywords, customCategories);
+      const parsed = parseList(rawText, map, otherCategoryName);
       if (!parsed.length) return;
       setItems(parsed);
       setPhase("shop");
-    } catch (e) { console.error(e); }
-  }, [rawText, customKeywords, customCategories]);
+    } catch (e) {
+      console.error(e);
+    }
+  }, [rawText, defaultCategoryMap, customKeywords, customCategories, otherCategoryName]);
 
   const toggle = useCallback((id) => {
     setItems((prev) => prev.map((item) => item.id === id ? { ...item, done: !item.done } : item));
   }, []);
 
   const handleRegisterSave = useCallback((keyword, cat, newCat) => {
-    let nextCC    = customCategories;
+    let resolvedCategory = cat;
+    let nextCategories = customCategories;
     let nextOrder = categoryOrder;
 
     if (newCat) {
-      nextCC = [...customCategories, newCat];
-      const otherIdx = nextOrder.indexOf("📦 その他");
-      nextOrder = otherIdx >= 0
-        ? [...nextOrder.slice(0, otherIdx), newCat.name, ...nextOrder.slice(otherIdx)]
-        : [...nextOrder, newCat.name];
-      setCustomCategories(nextCC);
-      setCategoryOrder(nextOrder);
-      ls.set(SK_CATEGORIES, JSON.stringify(nextCC));
-      ls.set(SK_ORDER, JSON.stringify(nextOrder));
+      const name = newCat.name;
+      const alreadyExists = defaultCategoryKeys.includes(name) || customCategories.some((c) => c.name === name);
+      if (!alreadyExists) {
+        nextCategories = [...customCategories, newCat];
+        const otherIdx = nextOrder.indexOf(otherCategoryName);
+        nextOrder = otherIdx >= 0
+          ? [...nextOrder.slice(0, otherIdx), name, ...nextOrder.slice(otherIdx)]
+          : [...nextOrder, name];
+      }
+      resolvedCategory = name;
     }
 
-    const nextKW = { ...customKeywords, [keyword]: cat };
-    setCustomKeywords(nextKW);
-    ls.set(SK_KEYWORDS, JSON.stringify(nextKW));
+    const nextKeywords = { ...customKeywords, [keyword]: resolvedCategory };
+    const normalizedOrder = sanitizeCategoryOrder(nextOrder, defaultCategoryKeys, nextCategories, otherCategoryName);
 
-    setItems((prev) => prev.map((item) => item.name.includes(keyword) ? { ...item, category: cat } : item));
+    persistUserData(nextKeywords, nextCategories, normalizedOrder);
+    setItems((prev) => prev.map((item) => item.name.includes(keyword) ? { ...item, category: resolvedCategory } : item));
     setSavedFlash(keyword);
     setTimeout(() => setSavedFlash(null), 2500);
     setRegisterItem(null);
-  }, [customKeywords, customCategories, categoryOrder]);
+  }, [customKeywords, customCategories, categoryOrder, defaultCategoryKeys, otherCategoryName, persistUserData]);
 
   const handleOrderChange = useCallback((newOrder) => {
-    setCategoryOrder(newOrder);
-    ls.set(SK_ORDER, JSON.stringify(newOrder));
+    const normalized = sanitizeCategoryOrder(newOrder, defaultCategoryKeys, customCategories, otherCategoryName);
+    persistUserData(customKeywords, customCategories, normalized);
     setPhase("paste");
-  }, []);
+  }, [customKeywords, customCategories, defaultCategoryKeys, otherCategoryName, persistUserData]);
 
   const handleDeleteCustom = useCallback((catName) => {
-    const nextCC = customCategories.filter((c) => c.name !== catName);
-    setCustomCategories(nextCC);
-    ls.set(SK_CATEGORIES, JSON.stringify(nextCC));
-    const nextKW = Object.fromEntries(Object.entries(customKeywords).filter(([, v]) => v !== catName));
-    setCustomKeywords(nextKW);
-    ls.set(SK_KEYWORDS, JSON.stringify(nextKW));
-  }, [customCategories, customKeywords]);
+    const nextCategories = customCategories.filter((c) => c.name !== catName);
+    const nextKeywords = Object.fromEntries(Object.entries(customKeywords).filter(([, v]) => v !== catName));
+    const nextOrder = sanitizeCategoryOrder(
+      categoryOrder.filter((name) => name !== catName),
+      defaultCategoryKeys,
+      nextCategories,
+      otherCategoryName,
+    );
+    persistUserData(nextKeywords, nextCategories, nextOrder);
+  }, [customCategories, customKeywords, categoryOrder, defaultCategoryKeys, otherCategoryName, persistUserData]);
+
+  const handleExportSettings = useCallback(() => {
+    const payload = {
+      version: EXPORT_SCHEMA_VERSION,
+      exportedAt: new Date().toISOString(),
+      data: {
+        customKeywords,
+        customCategories,
+        categoryOrder,
+      },
+    };
+
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `grocery-settings-${stamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    setImportNotice({ type: "success", message: "設定をエクスポートしました。" });
+  }, [customKeywords, customCategories, categoryOrder]);
+
+  const handleImportFile = useCallback(async (file) => {
+    setImportNotice(null);
+    setPendingImport(null);
+
+    try {
+      const text = await readFileAsText(file);
+      let raw;
+      try {
+        raw = JSON.parse(text);
+      } catch {
+        throw new Error("JSON の解析に失敗しました。UTF-8 の JSON ファイルを指定してください。");
+      }
+
+      const incoming = validateImportPayload(raw, defaultCategoryKeys, otherCategoryName);
+      const current = { customKeywords, customCategories, categoryOrder };
+      const conflicts = detectImportConflicts(current, incoming);
+
+      if (!conflicts.length) {
+        const merged = mergeImportData(current, incoming, {}, defaultCategoryKeys, otherCategoryName);
+        persistUserData(merged.customKeywords, merged.customCategories, merged.categoryOrder);
+        setImportNotice({ type: "success", message: "競合なしでインポートしました。" });
+        return;
+      }
+
+      const initialChoices = Object.fromEntries(conflicts.map((conflict) => [conflict.id, "current"]));
+      setPendingImport({ incoming, conflicts, choices: initialChoices });
+      setImportNotice({ type: "info", message: `競合が ${conflicts.length} 件あります。選択して適用してください。` });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "インポートに失敗しました。";
+      setImportNotice({ type: "error", message });
+    }
+  }, [customKeywords, customCategories, categoryOrder, defaultCategoryKeys, otherCategoryName, persistUserData]);
+
+  const handleConflictChoice = useCallback((id, choice) => {
+    setPendingImport((prev) => {
+      if (!prev) return prev;
+      return {
+        ...prev,
+        choices: { ...prev.choices, [id]: choice },
+      };
+    });
+  }, []);
+
+  const handleApplyImport = useCallback(() => {
+    if (!pendingImport) return;
+    const current = { customKeywords, customCategories, categoryOrder };
+    const merged = mergeImportData(
+      current,
+      pendingImport.incoming,
+      pendingImport.choices,
+      defaultCategoryKeys,
+      otherCategoryName,
+    );
+    persistUserData(merged.customKeywords, merged.customCategories, merged.categoryOrder);
+    setPendingImport(null);
+    setImportNotice({ type: "success", message: "競合を解決してインポートしました。" });
+  }, [pendingImport, customKeywords, customCategories, categoryOrder, defaultCategoryKeys, otherCategoryName, persistUserData]);
+
+  const handleCancelImport = useCallback(() => {
+    setPendingImport(null);
+    setImportNotice({ type: "error", message: "インポートをキャンセルしました。" });
+  }, []);
 
   const groups = {};
   for (const item of items) {
     if (!groups[item.category]) groups[item.category] = [];
     groups[item.category].push(item);
   }
+
   const ordered = sortedGroups(groups, categoryOrder);
   const doneCount = items.filter((i) => i.done).length;
-  const total     = items.length;
-  const uncategorizedCount = (groups["📦 その他"] || []).length;
-  const allCategoryKeys = [...DEFAULT_CATEGORY_KEYS, ...customCategories.map((c) => c.name)];
+  const total = items.length;
+  const uncategorizedCount = (groups[otherCategoryName] || []).length;
+  const allCategoryKeys = [...defaultCategoryKeys, ...customCategories.map((c) => c.name)];
 
   if (phase === "settings") {
     const settingsOrder = categoryOrder.filter((c) =>
-      DEFAULT_CATEGORY_KEYS.includes(c) || customCategories.some((cc) => cc.name === c) || c === "📦 その他"
+      defaultCategoryKeys.includes(c) || customCategories.some((cc) => cc.name === c) || c === otherCategoryName,
     );
+
     return (
       <SettingsScreen
         categoryOrder={settingsOrder}
         customCategories={customCategories}
+        otherCategoryName={otherCategoryName}
         onOrderChange={handleOrderChange}
         onDeleteCustom={handleDeleteCustom}
         onClose={() => setPhase("paste")}
+        onExportSettings={handleExportSettings}
+        onImportFile={handleImportFile}
+        importNotice={importNotice}
+        onDismissNotice={() => setImportNotice(null)}
+        pendingImport={pendingImport}
+        onConflictChoice={handleConflictChoice}
+        onApplyImport={handleApplyImport}
+        onCancelImport={handleCancelImport}
       />
     );
   }
@@ -388,8 +1104,8 @@ function GroceryApp() {
 
             {ordered.map((category) => {
               const catItems = groups[category];
-              const allDone  = catItems.every((i) => i.done);
-              const isOther  = category === "📦 その他";
+              const allDone = catItems.every((i) => i.done);
+              const isOther = category === otherCategoryName;
               return (
                 <div key={category} style={{ ...card, marginBottom: 10, overflow: "hidden", opacity: allDone ? 0.5 : 1, borderColor: allDone ? "#1a3a2a" : isOther ? "#3d2e10" : "#2a2f3e", transition: "all 0.3s" }}>
                   <div style={{ padding: "10px 14px", background: allDone ? "#141c14" : isOther ? "#1a1408" : "#1e2535", fontSize: 12, fontWeight: 700, color: allDone ? "#2d6a3a" : isOther ? "#d97706" : "#6c8ebf", letterSpacing: 1, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -437,7 +1153,36 @@ function GroceryApp() {
   );
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<GroceryApp />);
+function StartupErrorScreen({ message }) {
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", justifyContent: "center", alignItems: "center", padding: 20 }}>
+      <div style={{ ...card, maxWidth: 480, width: "100%", padding: 20, borderColor: "#4a3010", background: "#1e1810" }}>
+        <div style={{ ...lbl, color: "#f59e0b" }}>STARTUP ERROR</div>
+        <div style={{ fontSize: 20, fontWeight: 800, color: "#f59e0b", marginTop: 4, marginBottom: 12 }}>起動エラー</div>
+        <div style={{ fontSize: 13, color: "#fcd34d", lineHeight: 1.7, marginBottom: 10 }}>{message}</div>
+        <div style={{ fontSize: 12, color: "#d97706", lineHeight: 1.7 }}>
+          ローカルサーバーで起動して、`default-categories.json` の形式を確認してください。
+        </div>
+        <pre style={{ marginTop: 10, background: "#0f1117", color: "#d1d5db", border: "1px solid #2a2f3e", borderRadius: 8, padding: 10, fontSize: 12, overflowX: "auto" }}>python -m http.server 8000</pre>
+      </div>
+    </div>
+  );
+}
+
+async function bootstrap() {
+  const rootEl = document.getElementById("root");
+  const root = ReactDOM.createRoot(rootEl);
+
+  try {
+    const defaultConfig = await loadDefaultConfig();
+    root.render(<GroceryApp defaultConfig={defaultConfig} />);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "不明なエラーが発生しました。";
+    root.render(<StartupErrorScreen message={message} />);
+  }
+}
+
+bootstrap();
 </script>
 </body>
 </html>
