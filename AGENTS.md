@@ -6,7 +6,12 @@
 ## 必須ドキュメント
 - ソースコード（`index.html`, `styles.css`, `*.js` など）に変更を加えるたびに、必ず `EXPLANATION.md` を更新する。
 - `README.md`、`AGENTS.md`、`PLAN.md` のみを変更する場合、`EXPLANATION.md` の更新は必須ではない。
-- `EXPLANATION.md` には、プロジェクト全体を平易な日本語で説明する。
+
+## 'EXPLANATION.md' の更新
+- `EXPLANATION.md` は開発者の向けメモであり、プロジェクトの仕様について、平易な言葉で説明する。
+- リポジトリの機能仕様、なぜそのように設計されたのかを説明する。
+- 機能に影響する更新を行った場合は必ず更新する。
+- `readme.md` は、ユーザー向けのドキュメントで、`EXPLANATION.md` は開発者向けのドキュメントとして区別する。
 
 ## 作業範囲
 - 変更して良い: `index.html`, `styles.css`, `game-settings.js`, `EXPLANATION.md`, `README.md`, `AGENTS.md`, `PLAN.md`
